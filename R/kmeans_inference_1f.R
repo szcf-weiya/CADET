@@ -256,7 +256,7 @@ kmeans_estimation <- function(X, k, iter.max = 10, seed = 1234) {
 #' Published in 1982 in IEEE Transactions on Information Theory, 28, 128–137.
 #'
 kmeans_inference_1f <- structure(function(X, k, cluster_1, cluster_2,
-                                          feat, iso = FALSE, sig = NULL, covMat = NULL,
+                                          feats, iso = FALSE, sig = NULL, covMat = NULL,
                                           iter.max = 10, seed = 1234) {
   set.seed(seed)
   if (!is.matrix(X)) stop("X should be a matrix")
@@ -310,86 +310,93 @@ kmeans_inference_1f <- structure(function(X, k, cluster_1, cluster_2,
   n2 <- sum(estimated_final_cluster == cluster_2)
   squared_norm_nu <- 1 / n1 + 1 / n2
   v_norm <- sqrt(squared_norm_nu) # recycle this computed value
-  # compute XTv
-  diff_means_feat <- mean(X[estimated_final_cluster == cluster_1, feat]) -
-    mean(X[estimated_final_cluster == cluster_2, feat])
-  # compute
+  lst_result_list = NULL
+  idx_feat = 0
+  for (feat in feats) {
+    idx_feat = idx_feat + 1
+    # compute XTv
+    diff_means_feat <- mean(X[estimated_final_cluster == cluster_1, feat]) -
+      mean(X[estimated_final_cluster == cluster_2, feat])
+    # compute
 
-  p_naive <- NULL
-  # compute test_stat in the isotropic case
-  if (!is.null(sig)) {
-    test_stats <- diff_means_feat
-    scale_factor <- squared_norm_nu * sig^2
-    # compute S
+    p_naive <- NULL
+    # compute test_stat in the isotropic case
+    if (!is.null(sig)) {
+      test_stats <- diff_means_feat
+      scale_factor <- squared_norm_nu * sig^2
+      # compute S
 
-    final_interval_TN <- kmeans_compute_S_1f_iso(
-      X, estimated_k_means, all_T_clusters,
-      all_T_centroids, n, diff_means_feat,
-      v_vec, v_norm, T_length, k,
-      feat, sig^2
+      final_interval_TN <- kmeans_compute_S_1f_iso(
+        X, estimated_k_means, all_T_clusters,
+        all_T_centroids, n, diff_means_feat,
+        v_vec, v_norm, T_length, k,
+        feat, sig^2
+      )
+
+      # update p naive
+      # p_naive <- multivariate_Z_test(X, estimated_final_cluster, cluster_1, cluster_2, sig)
+    }
+
+    # compute test_stats in the general cov case
+    if (!is.null(covMat)) {
+      test_stats <- diff_means_feat
+
+      # compute S
+      sig_squared <- covMat[feat, feat]
+      scaledSigRow <- covMat[feat, ] / sig_squared
+      scaledSigRow_2_norm <- norm_vec(scaledSigRow)
+
+      scale_factor <- squared_norm_nu * sig_squared
+
+
+      final_interval_TN <- kmeans_compute_S_1f_genCov(
+        X, estimated_k_means, all_T_clusters,
+        all_T_centroids, n, diff_means_feat,
+        v_vec, v_norm, T_length, k,
+        feat, scaledSigRow, scaledSigRow_2_norm
+      )
+    }
+
+    p_naive <- naive.two.sided.pval(
+      z = test_stats,
+      mean = 0,
+      sd = sqrt(scale_factor)
     )
-
-    # update p naive
-    # p_naive <- multivariate_Z_test(X, estimated_final_cluster, cluster_1, cluster_2, sig)
-  }
-
-  # compute test_stats in the general cov case
-  if (!is.null(covMat)) {
-    test_stats <- diff_means_feat
-
-    # compute S
-    sig_squared <- covMat[feat, feat]
-    scaledSigRow <- covMat[feat, ] / sig_squared
-    scaledSigRow_2_norm <- norm_vec(scaledSigRow)
-
-    scale_factor <- squared_norm_nu * sig_squared
-
-
-    final_interval_TN <- kmeans_compute_S_1f_genCov(
-      X, estimated_k_means, all_T_clusters,
-      all_T_centroids, n, diff_means_feat,
-      v_vec, v_norm, T_length, k,
-      feat, scaledSigRow, scaledSigRow_2_norm
+    # improve numerical stability
+    final_interval_TN <- intervals::interval_union(as(final_interval_TN, "Intervals_full"),
+                                                   intervals::Intervals_full(c(
+                                                     test_stats - (1e-09),
+                                                     test_stats + (1e-09)
+                                                   )),
+                                                   check_valid = FALSE
     )
+    # update pval at the end of the day
+    # is this calc... correct tho? -- yes but only for mu = 0
+    if (test_stats > 0) {
+      pval <- TNSurv(test_stats, 0, sqrt(scale_factor), final_interval_TN) +
+        TNSurv(test_stats, 0, sqrt(scale_factor), intervals::Intervals(as.matrix(-final_interval_TN)[, 2:1]))
+    } else {
+      pval <- TNSurv(-test_stats, 0, sqrt(scale_factor), final_interval_TN) +
+        TNSurv(-test_stats, 0, sqrt(scale_factor), intervals::Intervals(as.matrix(-final_interval_TN)[, 2:1]))
+    }
+
+    result_list <- list(
+      "final_interval" = final_interval_TN,
+      "final_cluster" = estimated_final_cluster,
+      "test_stat" = test_stats,
+      "cluster_1" = cluster_1,
+      "cluster_2" = cluster_2,
+      "feat" = feat,
+      "sig" = sig,
+      "covMat" = covMat,
+      "scale_factor" = scale_factor,
+      "p_naive" = p_naive,
+      "pval" = pval,
+      "call" = match.call()
+    )
+    class(result_list) <- "kmeans_inference"
+    lst_result_list[[idx_feat]] = result_list
   }
 
-  p_naive <- naive.two.sided.pval(
-    z = test_stats,
-    mean = 0,
-    sd = sqrt(scale_factor)
-  )
-  # improve numerical stability
-  final_interval_TN <- intervals::interval_union(as(final_interval_TN, "Intervals_full"),
-    intervals::Intervals_full(c(
-      test_stats - (1e-09),
-      test_stats + (1e-09)
-    )),
-    check_valid = FALSE
-  )
-  # update pval at the end of the day
-  # is this calc... correct tho? -- yes but only for mu = 0
-  if (test_stats > 0) {
-    pval <- TNSurv(test_stats, 0, sqrt(scale_factor), final_interval_TN) +
-      TNSurv(test_stats, 0, sqrt(scale_factor), intervals::Intervals(as.matrix(-final_interval_TN)[, 2:1]))
-  } else {
-    pval <- TNSurv(-test_stats, 0, sqrt(scale_factor), final_interval_TN) +
-      TNSurv(-test_stats, 0, sqrt(scale_factor), intervals::Intervals(as.matrix(-final_interval_TN)[, 2:1]))
-  }
-
-  result_list <- list(
-    "final_interval" = final_interval_TN,
-    "final_cluster" = estimated_final_cluster,
-    "test_stat" = test_stats,
-    "cluster_1" = cluster_1,
-    "cluster_2" = cluster_2,
-    "feat" = feat,
-    "sig" = sig,
-    "covMat" = covMat,
-    "scale_factor" = scale_factor,
-    "p_naive" = p_naive,
-    "pval" = pval,
-    "call" = match.call()
-  )
-  class(result_list) <- "kmeans_inference"
-  return(result_list)
+  return(lst_result_list)
 })
